@@ -41,13 +41,6 @@ def main():
         help="Number of samples",
     )
     parser.add_argument(
-        "--confidence_strategy",
-        type=str,
-        default="verbalized",
-        required=True,
-        help="Confidence score method (so far only verb)",
-    )
-    parser.add_argument(
         "--temperature",
         type=float,
         default=1.0,
@@ -56,7 +49,7 @@ def main():
     parser.add_argument(
         "--num_workers",
         type=int,
-        default=4,
+        default=16,
         help="Number of workers to use for parallel processing",
     )
     parser.add_argument(
@@ -66,27 +59,24 @@ def main():
     )
 
     args = parser.parse_args()
-    args.method_name = f"{args.prompt_strategy}_{args.confidence_strategy}"
     print(args)
 
     run = wandb.init(
         project=args.project_name,
         job_type="inference",
-        config=args,
+        config=args.to_dict(),
     )
+
+    # Load Dataframe form disk
+    dataset = get_dataset(args.dataset_name, args.num_samples)
 
     # Load LLM config
     llm_config = {
         "model": args.model,
         "temperature": args.temperature,
     }
-
-    # Load Dataframe form disk
-    dataset = get_dataset(args.dataset_name, args.num_samples)
-
     # Get the correct processor using factory pattern
-    Processor_CLS = get_processor(args.method_name)
-    processor = Processor_CLS(llm_config)
+    processor = get_processor(args.method_name, llm_config)
 
     # Process the dataset using the processor in parallel
     with concurrent.futures.ThreadPoolExecutor(
@@ -115,7 +105,7 @@ def main():
     results_table = f"run-{run.id}-table"
 
     # TODO: eval
-    eval.main(["--table", output_file_path])
+    eval.main(["--results_table", results_table])
 
 
 # Entry point for script

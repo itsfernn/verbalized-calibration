@@ -122,7 +122,7 @@ class MultistepProcessor(BaseSampleProcessor):
 
 
 # Factory Method for creating processors
-def get_processor(method_name):
+def get_processor(method_name, llm_config) -> BaseSampleProcessor:
     processors = {
         "cot": CotProcessor,
         "direct": DirectProcessor,
@@ -134,4 +134,4 @@ def get_processor(method_name):
     if processor is None:
         raise ValueError(f"Invalid method: {method_name}")
 
-    return processor
+    return processor(llm_config)
