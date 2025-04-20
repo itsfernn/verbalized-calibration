@@ -1,5 +1,6 @@
-from chat import Chat
 import math
+
+from utils.chat import Chat
 from utils.utils import (
     extract_answer_and_confidence,
     compute_f1,
