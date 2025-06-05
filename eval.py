@@ -1,77 +1,90 @@
 import argparse
+import pandas as pd
+from utils.processor import get_processor
+from utils.datasets import get_dataset
+from utils.utils import (
+    plot_confidence_error,
+    expected_calibration_error,
+    calculate_auroc,
+    calculate_macro_ece,
+)
 import wandb
-import sklearn.metrics
-from utils.utils import expected_calibration_error, plot_confidence_error
+
+import os
 
 
 def main(args=None):
-    parser = argparse.ArgumentParser(description="Evaluate a model on a dataset.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate results from a previous inference run."
+    )
     parser.add_argument(
-        "--table",
-        type=str,
+        "--results_table",
         required=True,
-        help="wandb artifact table to responses",
+        help="The ID of the Weights & Biases table artifact containing inference results.",
     )
     parser.add_argument(
         "--project_name",
-        type=str,
         default="uncertainty-reimplimentation-results",
-        help="Name of the project",
+        help="Name of the Weights & Biases project where the results table is located.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode for evaluation.",
+    )
+    parser.add_argument(
+        "--eval",
+        default="em",
+        help="Type of eval to use to calculate metrics (em, gpt-eval)"
+    )
+    parser.add_argument(
+        "--job_type",
+        default="eval",
+        help="Change Job type"
     )
     args = parser.parse_args(args)
-    print(args)
+    run = wandb.init(
+        project=args.project_name,
+        job_type=args.job_type if not args.debug else "debug-eval",
+        config=args,  # type: ignore
+    )
 
-    run = wandb.init(project=args.project_name, job_type="eval", config=args)
-    table_artifact = run.use_artifact(f"{args.project_name}/{args.table}:latest")
-    table = table_artifact.get("table").get_dataframe()
+    table_artifact = run.use_artifact(
+        f"{args.project_name}/{args.results_table}:latest"
+    )
+    table: pd.DataFrame = table_artifact.get("table").get_dataframe()
     run.config.update(table_artifact.logged_by().config)
 
-    xlabel = f"{args.aggregation} " if args.aggregation else ""
-    xlabel += f"{run.config.confidence_strategy} "
-    xlabel += "confidence"
-
     fig, _ = plot_confidence_error(
-        table[args.score],
-        table["em"],
-        title=f"{run.config.dataset_name} {run.config.model}",
-        ylabel=args.score.title(),
-        xlabel=xlabel.title(),
+        table[args.eval],
+        table["confidence"],
+        title=f"{run.config.prompt} ({run.config.dataset}, {run.config.model})",
+        ylabel="Accuracy",
+        xlabel="Verbalized Confidence",
     )
+
+    table = table.dropna()  ## remove missing rows
+
+    f1_score = table["f1"].mean()
+    accuracy = table[args.eval].mean()
+    ece_score = expected_calibration_error(table[args.eval], table["confidence"])
+    auroc_score = calculate_auroc(table[args.eval], table["confidence"])
+    macro_ece_score = calculate_macro_ece(table, collumn=args.eval)
 
     wandb.log(
         {
-            "f1": table["f1"].mean(),
-            "acc": table["em"].mean(),
-            "ece": expected_calibration_error(table[args.score], table["em"]),
-            "auroc": calculate_auroc(table, args.score),
-            "macro_ece": calculate_marco_ece(table, args.score),
+            "f1": f1_score,
+            "acc": accuracy,
+            "ece": ece_score,
+            "auroc": auroc_score,
+            "macro_ece": macro_ece_score,
         }
     )
 
     wandb.log({"calibration_plot": wandb.Image(fig)})
-    # TODO log table again if it changed
 
     run.finish()
 
-
-def calculate_marco_ece(table, eval_column):
-    table_p = table[table["em"]]
-    ice_p = expected_calibration_error(table_p[eval_column], table_p["em"])
-
-    table_n = table[table["em"] == 0]
-    ice_n = expected_calibration_error(table_n[eval_column], table_n["em"])
-
-    macro_ece = (ice_p + ice_n) / 2
-
-    return macro_ece
-
-
-def calculate_auroc(table, eval_column):
-    fpr, tpr, thresholds = sklearn.metrics.roc_curve(
-        y_true=table[eval_column], y_score=table["em"], pos_label=1
-    )
-    auroc = sklearn.metrics.auc(fpr, tpr)
-    return auroc
 
 
 if __name__ == "__main__":

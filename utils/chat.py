@@ -23,6 +23,7 @@ class Chat:
         self.config = {
             "model": full_model_names.get(model, model),
             "temperature": temperature,
+            "max_tokens": 500,
             **kwargs,
         }
         if self.config["model"].startswith("gpt"):
@@ -45,6 +46,11 @@ class Chat:
         )
         message = message.strip()
         return message
+
+    def raw_response(self):
+        response = self.model.invoke(self.chat)
+        return response
+        
 
     def set_system_prompt(self, prompt):
         self.chat[0]["content"] = prompt

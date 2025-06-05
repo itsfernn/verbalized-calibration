@@ -1,36 +1,39 @@
 from datasets import load_dataset, Dataset
-import json
 import pandas as pd
-from utils.utils import normalize_text
 
 
-def get_dataset(dataset_name, num_samples=500) -> pd.DataFrame:
-    if "hotpotqa" == normalize_text(dataset_name):
-        dataset = load_dataset(
-            "hotpotqa/hotpot_qa", "distractor", split=f"validation[:{num_samples}]"
+def get_dataset(dataset, num_samples=500, seed=42, all_collumns=False) -> Dataset:
+    if dataset == "HotpotQA":
+        ds = load_dataset("hotpotqa/hotpot_qa", "fullwiki", split="train")
+        assert isinstance(ds, Dataset)
+        ds = ds.shuffle(seed=seed).select(range(num_samples))
+
+        if not all_collumns:
+            ds = ds.select_columns(["id", "question", "answer", "type", "level"])
+
+    elif dataset == "2WikiMultihopQA":
+        path = "datasets/2WikiMultihopQA/"
+        df = pd.read_json(path + "dev.jsonl", orient="records", lines=True)
+        ds = Dataset.from_pandas(df)
+        ds = ds.rename_column("_id", "id")
+        ds = ds.remove_columns(["evidences"])
+        ds = ds.shuffle(seed=seed).select(range(num_samples))
+
+        if not all_collumns:
+            ds = ds.select_columns(["id", "question", "answer", "type"])
+
+    elif dataset == "MuSiQue":
+        ds = load_dataset("bdsaglam/musique", "answerable", split="validation")
+        assert isinstance(ds, Dataset)
+        ds = ds.shuffle(seed=seed).select(range(num_samples))
+        ds = ds.remove_columns(
+            ["question_decomposition", "answer_aliases", "answerable"]
         )
-        assert isinstance(dataset, Dataset)
-        df = dataset.to_pandas()
 
-    elif "2wiki" in normalize_text(dataset_name):
-        with open("datasets/2WikiMultihopQA/dev.json", "r") as f:
-            data = json.loads(f.read())
+        if not all_collumns:
+            ds = ds.select_columns(["id", "question", "answer"])
 
-        df = pd.DataFrame(data[:num_samples])
-        df["id"] = df["_id"]
-
-    elif "musique" == normalize_text(dataset_name):
-        dataset = load_dataset(
-            "bdsaglam/musique", "answerable", split=f"validation[:{num_samples}]"
-        )
-        assert isinstance(dataset, Dataset)
-        df = dataset.to_pandas()
-        assert isinstance(df, pd.DataFrame)
-        df["id"] = df["_id"]
     else:
-        raise ValueError()
+        raise ValueError(f"Unknown dataset: {dataset}")
 
-    assert isinstance(df, pd.DataFrame)
-    df = df[["id", "question", "answer"]]
-    assert isinstance(df, pd.DataFrame)
-    return df
+    return ds
