@@ -1,19 +1,18 @@
-import argparse
+import argparse # Keep for eval function
+# main llm inference
+from tqdm import tqdm
 import pandas as pd
 from utils.processor import get_processor
+from utils.chat import get_llm
 from utils.datasets import get_dataset
-from utils.utils import (
-    plot_confidence_error,
-    expected_calibration_error,
-    calculate_auroc,
-    calculate_macro_ece,
-)
 import wandb
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from utils.gpt_eval import gpt_eval
+from eval import evaluate
+from logistic_regression import logistic_regression
 
-import os
-
-os.environ["HF_DATASETS_DISABLE_CACHE"] = "1"
-
+thread_local = threading.local()
 
 # Main function to run the process
 def main():
@@ -32,7 +31,7 @@ def main():
         "--model",
         type=str,
         required=True,
-        help="Name of the language model to use (e.g., 'gpt-4o-mini', 'deepseek-coder').",
+        help="Name of the language model to use (e.g., 'gpt-4o-mini', 'deepseek').",
     )
     parser.add_argument(
         "--prompt",
@@ -43,7 +42,7 @@ def main():
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=500,
+        default=1000,
         help="Number of samples to process from the dataset.",
     )
     parser.add_argument(
@@ -60,19 +59,8 @@ def main():
     )
     parser.add_argument(
         "--project_name",
-        default="uncertainty-reimplimentation-results",
+        required=True,
         help="Name of the Weights & Biases project to log results.",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode, processing a smaller subset and logging to a debug job type.",
-    )
-    parser.add_argument(
-        "--tags",
-        type=str,
-        nargs="+",
-        help="List of tags",
     )
 
     args = parser.parse_args()
@@ -80,117 +68,121 @@ def main():
 
     run = wandb.init(
         project=args.project_name,
-        job_type="inference" if not args.debug else "debug",
+        job_type="inference",
         config=args,  # type: ignore
-        tags=args.tags,
     )
 
-    # Load Dataframe form disk
-    dataset = get_dataset(args.dataset, args.num_samples)
+    dataset = get_dataset(args.dataset, args.num_samples) # Assuming get_dataset returns a list of samples
 
-    # Load LLM config
     llm_config = {
         "model": args.model,
         "temperature": args.temperature,
     }
 
-    # Get the correct processor using factory pattern
-    processor = get_processor(args.prompt, llm_config)
+    processor = get_processor(args.prompt)
 
-    # Process the dataset using the processor in parallel
-    table = dataset.map(
-        processor, num_proc=args.num_workers, load_from_cache_file=False
+
+    def process_sample(sample):
+        if not hasattr(thread_local, 'llm'):
+            thread_local.llm = get_llm(**llm_config)
+        sample = processor.process_sample(sample, thread_local.llm)
+        return sample
+
+    with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
+        results_list = list(tqdm(executor.map(process_sample, dataset), total=len(dataset), desc="Answering Questions"))
+        table = pd.DataFrame(results_list)
+
+    # Evaluate all the successfully processed samples
+    results = table[table["texts"].apply(lambda x: len(x) > 0)]
+    results = pd.DataFrame(map(processor.eval_sample, results.to_dict(orient="records")))
+    results = results.drop(columns=["texts", "confidences"], errors='ignore')
+
+    # gpt eval
+    with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
+        gpt_eval_results = list(tqdm(executor.map(lambda sample: gpt_eval(sample, thread_local), results.to_dict(orient="records")), total=len(results), desc="GPT Evals"))
+        results["gpt_eval"] = gpt_eval_results
+
+
+    failed = table[table["texts"].apply(lambda x: len(x) == 0)]
+    failed = failed.drop(columns=["texts", "confidences"], errors='ignore')
+
+    table = wandb.Table(dataframe=results)
+    failed = wandb.Table(dataframe=failed)
+
+    # Define the artifact name based on prompt, dataset, and model
+    artifact_name = f"{args.prompt}-{args.dataset}-{args.model}"
+
+    # Create the wandb.Artifact
+    inference_artifact = wandb.Artifact(
+        name=artifact_name,
+        type="inference",        # Set artifact type to "inference"
+        metadata=vars(args)      # Add run arguments as metadata
     )
-    results = table.filter(lambda x: bool(x["texts"]), load_from_cache_file=False)
-    results = results.map(processor.eval_sample, load_from_cache_file=False)
-    results = results.remove_columns(["texts", "confidences"])
 
-    failed = table.filter(lambda x: not bool(x["texts"]), load_from_cache_file=False)
-    failed = failed.remove_columns(["texts", "confidences"])
+    # Add the W&B tables to the artifact
+    # The eval function expects the main results table to be named "table"
+    inference_artifact.add(table, name="table")
+    inference_artifact.add(failed, name="failed") # Add failed samples table
 
-    table = wandb.Table(dataframe=results.to_pandas())
-    failed = wandb.Table(dataframe=failed.to_pandas())
+    # Log the artifact
+    run.log_artifact(inference_artifact)
+
+    # Keep the original direct logging of tables for easy viewing in the run's workspace
     wandb.log({"table": table, "failed": failed})
 
-    wandb.finish()
-
-    results_table = f"run-{run.id}-table"
-    args.results_table = results_table
-
-    args_list = ["--results_table", results_table, "--project_name", args.project_name]
-
-    if args.debug:
-        args_list.append("--debug")
-
-    eval(args_list)
+    wandb.finish() # Finish the main inference run
 
 
-def eval(args):
-    parser = argparse.ArgumentParser(
-        description="Evaluate results from a previous inference run."
-    )
-    parser.add_argument(
-        "--results_table",
-        required=True,
-        help="The ID of the Weights & Biases table artifact containing inference results.",
-    )
-    parser.add_argument(
-        "--project_name",
-        default="uncertainty-reimplimentation-results",
-        help="Name of the Weights & Biases project where the results table is located.",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode for evaluation.",
-    )
-    parser.add_argument(
-        "--eval",
-        default="em",
-        help="Type of eval to use to calculate metrics (em, gpt-eval)",
-    )
-    parser.add_argument("--job_type", default="eval", help="Change Job type")
-    args = parser.parse_args(args)
+
+    ##### Start raw evaluation
+
     run = wandb.init(
         project=args.project_name,
-        job_type=args.job_type if not args.debug else "debug-eval",
+        job_type="eval",
         config=args,  # type: ignore
     )
 
     table_artifact = run.use_artifact(
-        f"{args.project_name}/{args.results_table}:latest"
+        f"{args.project_name}/{artifact_name}:latest"
     )
-    table: pd.DataFrame = table_artifact.get("table").get_dataframe()
-    run.config.update(table_artifact.logged_by().config)
+    table_df: pd.DataFrame = table_artifact.get("table").get_dataframe() # Renamed to table_df to avoid conflict
+    run.config.update(table_artifact.logged_by().config) # type: ignore
 
-    fig, _ = plot_confidence_error(
-        table[args.eval],
-        table["confidence"],
-        title=f"{run.config.prompt} ({run.config.dataset}, {run.config.model})",
-        ylabel="Accuracy",
-        xlabel="Verbalized Confidence",
-    )
-
-    table = table.dropna()  ## remove missing rows
-
-    f1_score = table["f1"].mean()
-    accuracy = table[args.eval].mean()
-    ece_score = expected_calibration_error(table[args.eval], table["confidence"])
-    auroc_score = calculate_auroc(table[args.eval], table["confidence"])
-    macro_ece_score = calculate_macro_ece(table, args.eval)
+    results_dict = evaluate(table_df["gpt_eval"].to_numpy(), table_df["confidence"].to_numpy())
 
     wandb.log(
-        {
-            "f1": f1_score,
-            "acc": accuracy,
-            "ece": ece_score,
-            "auroc": auroc_score,
-            "macro_ece": macro_ece_score,
-        }
+        results_dict
     )
 
-    wandb.log({"calibration_plot": wandb.Image(fig)})
+    run.finish()
 
+
+    ##### start logistic regression
+    run = wandb.init(
+        project=args.project_name,
+        job_type="logistic_regression",
+        config=args,  # type: ignore
+    )
+
+    table_artifact = run.use_artifact(
+        f"{args.project_name}/{artifact_name}:latest"
+    )
+    table_df: pd.DataFrame = table_artifact.get("table").get_dataframe() # Renamed to table_df to avoid conflict
+    run.config.update(table_artifact.logged_by().config) # type: ignore
+
+    # Prepare data for logistic regression
+    y = table_df["gpt_eval"].to_numpy()
+    if args.prompt == "multistep":
+        # for multistep we use final_confidence, mean_confidence, min_confidence, max_confidence, num_steps
+        X = table_df[["confidence", "final_confidence", "mean_confidence", "min_confidence", "max_confidence", "num_steps"]].to_numpy()
+    else:
+        X = table_df["confidence"].to_numpy().reshape(-1, 1)
+
+    results_dict = logistic_regression(X, y)
+
+    wandb.log(
+        results_dict
+    )
     run.finish()
 
 

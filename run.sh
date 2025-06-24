@@ -4,7 +4,6 @@
 models=("DeepSeek-V3" "gpt-4o-mini" "Llama-3.3-70B" "gpt-4o")
 datasets=("HotpotQA" "2WikiMultihopQA" "MuSiQue")
 prompts=("direct" "cot" "top-k" "multistep")
-tags=()
 num_samples=1000
 num_workers=10
 temperature=0.7
@@ -20,7 +19,6 @@ Options:
   --models MODEL1 [MODEL2 ...]       Specify models (default: ${models[*]})
   --datasets DATASET1 [DATASET2 ...] Specify datasets (default: ${datasets[*]})
   --prompts PROMPT1 [PROMPT2 ...]    Specify prompts (default: ${prompts[*]})
-  --tags [TAGS]
   --num_samples N                    Number of samples (default: $num_samples)
   --temperature T                    Temperature (default: $temperature)
   --num_workers N                  Number of workers (default: $num_workers)
@@ -55,14 +53,6 @@ while [[ $# -gt 0 ]]; do
     prompts=() # Clear default prompts
     while [[ $# -gt 0 && "$1" != --* ]]; do
       prompts+=("$1")
-      shift
-    done
-    ;;
-  --tags)
-    shift   # past the --prompts argument
-    tags=() # Clear default prompts
-    while [[ $# -gt 0 && "$1" != --* ]]; do
-      tags+=("$1")
       shift
     done
     ;;
@@ -136,7 +126,7 @@ for dataset in "${datasets[@]}"; do
         --num_samples "$num_samples"
         --num_workers "$num_workers"
         --temperature "$temperature"
-        --tags "${tags[*]}"
+        --project_name "Verbalized Multistep Confidence"
       )
       $debug && args+=(--debug)
       echo "Command: python run.py ${args[*]}"

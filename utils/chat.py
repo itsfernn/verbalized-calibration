@@ -6,6 +6,27 @@ from langchain_together import ChatTogether
 load_dotenv()
 
 
+def get_llm(model_name="gpt-4.1-mini", temperature=0.7, max_tokens = 300, **kwargs):
+    short_names = {
+        "DeepSeek-V3": "deepseek-ai/DeepSeek-V3",
+        "Llama-3.3-70B": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "Llama-3.1-8B": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+    }
+
+    config = {
+        "model": short_names.get(model_name, model_name),
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        **kwargs,
+    }
+    if config["model"].startswith("gpt"):
+        llm =  ChatOpenAI(**config)
+    else:
+        llm = ChatTogether(**config)
+
+    return llm
+
+
 class Chat:
     def __init__(
         self, developer_prompt=None, model="gpt-4o-mini", temperature=1.0, **kwargs
@@ -50,7 +71,7 @@ class Chat:
     def raw_response(self):
         response = self.model.invoke(self.chat)
         return response
-        
+
 
     def set_system_prompt(self, prompt):
         self.chat[0]["content"] = prompt
